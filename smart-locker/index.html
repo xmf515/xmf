@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>智能储物柜系统</title>
+  <link rel="icon" href="data:,">
+  <script src="paho-mqtt.min.js"></script>
+  <style>
+    body {
+      font-family: 'Arial', sans-serif;
+      max-width: 500px;
+      margin: 0 auto;
+      padding: 20px;
+      background-color: #f5f5f5;
+    }
+    .container {
+      background: white;
+      border-radius: 10px;
+      padding: 25px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+    }
+    h1 {
+      color: #2c3e50;
+      margin-bottom: 30px;
+    }
+    .status {
+      padding: 10px;
+      border-radius: 5px;
+      margin-bottom: 20px;
+      font-weight: bold;
+    }
+    .connected { background: #d4edda; color: #155724; }
+    .disconnected { background: #f8d7da; color: #721c24; }
+    .connecting { background: #fff3cd; color: #856404; }
+    button {
+      background: #3498db;
+      color: white;
+      border: none;
+      padding: 12px 20px;
+      border-radius: 5px;
+      cursor: pointer;
+      font-size: 16px;
+      transition: background 0.3s;
+      margin: 5px;
+    }
+    button:hover { background: #2980b9; }
+    button:disabled {
+      background: #95a5a6;
+      cursor: not-allowed;
+    }
+    input {
+      padding: 10px;
+      border: 1px solid #ddd;
+      border-radius: 5px;
+      width: 200px;
+      font-size: 16px;
+    }
+    .code-display {
+      font-size: 20px;
+      font-weight: bold;
+      color: #e74c3c;
+      margin: 15px 0;
+      min-height: 30px;
+    }
+    .section {
+      margin: 25px 0;
+      padding: 20px;
+      border: 1px solid #eee;
+      border-radius: 5px;
+    }
+    #error-panel {
+      background: #f8d7da;
+      color: #721c24;
+      padding: 15px;
+      border-radius: 5px;
+      margin-bottom: 20px;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div id="error-panel"></div>
+    
+    <h1>智能储物柜 <span id="locker-id">001</span></h1>
+    <div id="connection-status" class="status connecting">正在初始化系统...</div>
+    
+    <div class="section">
+      <h2>存物</h2>
+      <button id="store-btn" disabled>打开柜门存物</button>
+      <div class="code-display" id="code-display"></div>
+      <p>请妥善保存取件码！</p>
+    </div>
+    
+    <div class="section">
+      <h2>取物</h2>
+      <input type="text" id="pickup-code" placeholder="输入6位取件码" maxlength="6" disabled>
+      <button id="retrieve-btn" disabled>打开柜门取物</button>
+    </div>
+  </div>
+
+  <script>
+    // 配置区域
+    const CONFIG = {
+      lockerId: "001",
+      servers: [
+        {
+          host: "broker.emqx.io",
+          port: 8084,
+          path: "/mqtt",
+          useSSL: true
+        },
+        {
+          host: "test.mosquitto.org",
+          port: 8081,
+          path: "/mqtt",
+          useSSL: true
+        }
+      ],
+      reconnectDelay: 3000
+    };
+
+    // 全局变量
+    let mqttClient;
+    let currentServerIndex = 0;
+
+    // UI控制
+    function updateStatus(status, message) {
+      const el = document.getElementById('connection-status');
+      el.className = 'status ' + status;
+      el.textContent = message;
+    }
+
+    // MQTT核心
+    function connectToServer() {
+      const server = CONFIG.servers[currentServerIndex];
+      updateStatus("connecting", `正在连接 ${server.host}...`);
+      
+      const clientId = `web_${Math.random().toString(16).substr(2, 8)}`;
+      mqttClient = new Paho.MQTT.Client(
+        server.host,
+        server.port,
+        server.path,
+        clientId
+      );
+
+      mqttClient.onConnectionLost = onConnectionLost;
+      mqttClient.onMessageArrived = onMessageArrived;
+
+      const connectOptions = {
+        timeout: 5,
+        keepAliveInterval: 30,
+        useSSL: server.useSSL,
+        onSuccess: onConnectSuccess,
+        onFailure: onConnectFailure,
+        mqttVersion: 4
+      };
+
+      mqttClient.connect(connectOptions);
+    }
+
+    function tryNextServer() {
+      currentServerIndex = (currentServerIndex + 1) % CONFIG.servers.length;
+      setTimeout(connectToServer, CONFIG.reconnectDelay);
+    }
+
+    // MQTT回调
+    function onConnectSuccess() {
+      console.log("MQTT连接成功");
+      updateStatus("connected", "已连接");
+      
+      document.getElementById('store-btn').disabled = false;
+      document.getElementById('pickup-code').disabled = false;
+      document.getElementById('retrieve-btn').disabled = false;
+      
+      mqttClient.subscribe(`locker/${CONFIG.lockerId}/status`);
+    }
+
+    function onConnectFailure(error) {
+      console.error("连接失败:", error.errorMessage);
+      updateStatus("disconnected", `连接失败: ${error.errorMessage}`);
+      tryNextServer();
+    }
+
+    function onConnectionLost(response) {
+      console.warn("连接断开:", response.errorMessage);
+      updateStatus("disconnected", "连接已断开");
+      
+      document.getElementById('store-btn').disabled = true;
+      document.getElementById('pickup-code').disabled = true;
+      document.getElementById('retrieve-btn').disabled = true;
+      
+      setTimeout(connectToServer, CONFIG.reconnectDelay);
+    }
+
+    function onMessageArrived(message) {
+      try {
+        const data = JSON.parse(message.payloadString);
+        if (data.code) {
+          document.getElementById('code-display').textContent = 
+            `您的取件码: ${data.code}`;
+        }
+      } catch (err) {
+        console.error("消息解析错误:", err);
+      }
+    }
+
+    // 业务逻辑
+    function storeItem() {
+      const btn = document.getElementById('store-btn');
+      btn.disabled = true;
+      btn.textContent = "处理中...";
+      
+      const message = new Paho.MQTT.Message(JSON.stringify({
+        action: "store",
+        lockerId: CONFIG.lockerId,
+        time: new Date().toISOString()
+      }));
+      message.destinationName = `locker/${CONFIG.lockerId}/cmd`;
+      
+      mqttClient.send(message);
+      
+      setTimeout(() => {
+        btn.disabled = false;
+        btn.textContent = "打开柜门存物";
+      }, 3000);
+    }
+
+    function retrieveItem() {
+      const code = document.getElementById('pickup-code').value.trim();
+      const btn = document.getElementById('retrieve-btn');
+      
+      if (!/^\d{6}$/.test(code)) {
+        alert("请输入6位数字取件码");
+        return;
+      }
+      
+      btn.disabled = true;
+      btn.textContent = "验证中...";
+      
+      const message = new Paho.MQTT.Message(JSON.stringify({
+        code: code,
+        lockerId: CONFIG.lockerId,
+        time: new Date().toISOString()
+      }));
+      message.destinationName = `locker/${CONFIG.lockerId}/auth`;
+      
+      mqttClient.send(message);
+      
+      setTimeout(() => {
+        btn.disabled = false;
+        btn.textContent = "打开柜门取物";
+      }, 3000);
+    }
+
+    // 初始化
+    document.addEventListener('DOMContentLoaded', function() {
+      document.getElementById('store-btn').addEventListener('click', storeItem);
+      document.getElementById('retrieve-btn').addEventListener('click', retrieveItem);
+      
+      document.getElementById('pickup-code').addEventListener('keypress', function(e) {
+        if (e.key === 'Enter') retrieveItem();
+      });
+      
+      // 检查Paho库是否加载成功
+      if (typeof Paho === 'undefined') {
+        document.getElementById('error-panel').style.display = 'block';
+        document.getElementById('error-panel').textContent = 
+          '系统初始化失败：MQTT库加载失败，请刷新页面';
+      } else {
+        connectToServer();
+      }
+    });
+  </script>
+</body>
+</html>
